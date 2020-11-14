@@ -1,0 +1,10 @@
+[package]
+name = "async-log-watcher"
+version = "0.1.0"
+authors = ["mlcruz1 <mlcruz@inf.ufrgs.br>"]
+edition = "2018"
+
+[dependencies]
+async-std = {version = "1.6.5", features =["attributes", "tokio02", "unstable"] }
+futures-lite = "1.11.2"
+async-fs = "1.5.0"
