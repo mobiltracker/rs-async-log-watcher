@@ -16,7 +16,7 @@ struct LogBufReader {
 pub struct LogWatcher {
     receiver: Receiver<Vec<u8>>,
     sender: Arc<Sender<Vec<u8>>>,
-    path: String,
+    path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -37,13 +37,13 @@ pub enum LogWatcherSignal {
 }
 
 impl LogWatcher {
-    pub fn new(file_path: &str) -> Self {
+    pub fn new(file_path: impl Into<PathBuf>) -> Self {
         let (sender, receiver) = async_std::sync::channel(4096);
 
         Self {
             receiver,
             sender: Arc::new(sender),
-            path: file_path.to_owned(),
+            path: file_path.into(),
         }
     }
 
@@ -106,7 +106,7 @@ impl LogWatcher {
             let mut detached = DetachedLogWatcher::Waiting(LogBufReader {
                 file: BufReader::new(file),
                 sender,
-                path: path.into(),
+                path,
             });
 
             loop {
