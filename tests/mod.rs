@@ -56,8 +56,12 @@ mod tests {
 
     #[async_std::test]
     async fn reload_working() {
-        let mut written: Vec<String> = vec![];
-        let mut read: Vec<String> = vec![];
+        let mut written_first_round: Vec<String> = vec![];
+        let mut written_second_round: Vec<String> = vec![];
+
+        let mut read_first_round: Vec<String> = vec![];
+        let mut read_second_round: Vec<String> = vec![];
+
         let mut test_writer = TestWriter::new("test_data", "test.txt", 1).await;
 
         let log_watcher = async_log_watcher::LogWatcher::new("test_data/test.txt");
@@ -67,14 +71,28 @@ mod tests {
         let now = Instant::now();
 
         while now.elapsed().as_millis() < 1000 {
-            if let Ok(data) = test_writer.written_rx.try_recv() {
-                written.push(data);
+            while let Ok(data) = test_writer.written_rx.try_recv() {
+                written_first_round.push(data);
             }
-            if let Ok(data) = log_watcher.try_recv() {
+            while let Ok(data) = log_watcher.try_recv() {
                 for line in std::str::from_utf8(&data).unwrap().split("\n") {
                     if line.len() > 0 {
-                        read.push(format!("{}\n", line));
+                        read_first_round.push(format!("{}\n", line));
                     }
+                }
+            }
+        }
+
+        test_writer.stop();
+        sleep(Duration::from_millis(100)).await;
+
+        while let Ok(data) = test_writer.written_rx.try_recv() {
+            written_first_round.push(data);
+        }
+        while let Ok(data) = log_watcher.try_recv() {
+            for line in std::str::from_utf8(&data).unwrap().split("\n") {
+                if line.len() > 0 {
+                    read_first_round.push(format!("{}\n", line));
                 }
             }
         }
@@ -84,37 +102,44 @@ mod tests {
 
         let now = Instant::now();
         while now.elapsed().as_millis() < 1000 {
-            if let Ok(data) = test_writer.written_rx.try_recv() {
-                written.push(data);
+            while let Ok(data) = test_writer.written_rx.try_recv() {
+                written_second_round.push(data);
             }
-            if let Ok(data) = log_watcher.try_recv() {
+            while let Ok(data) = log_watcher.try_recv() {
                 for line in std::str::from_utf8(&data).unwrap().split("\n") {
                     if line.len() > 0 {
-                        read.push(format!("{}\n", line));
+                        read_second_round.push(format!("{}\n", line));
                     }
                 }
             }
         }
 
-        sleep(Duration::from_secs(1)).await;
+        test_writer.stop();
         log_watcher_channel.send(LogWatcherSignal::Close).await;
 
-        if let Ok(data) = test_writer.written_rx.try_recv() {
-            written.push(data);
+        while let Ok(data) = test_writer.written_rx.try_recv() {
+            read_second_round.push(data);
         }
-        if let Ok(data) = log_watcher.try_recv() {
+        while let Ok(data) = log_watcher.try_recv() {
             for line in std::str::from_utf8(&data).unwrap().split("\n") {
                 if line.len() > 0 {
-                    read.push(format!("{}\n", line));
+                    read_second_round.push(format!("{}\n", line));
                 }
             }
         }
 
         sleep(Duration::from_secs(1)).await;
 
-        for idx in 0..read.len() {
-            print!("{}", read[idx]);
-            assert_eq!(read[idx], written[idx]);
+        for idx in 0..read_first_round.len() {
+            print!("{}", read_first_round[idx]);
+            assert_eq!(read_first_round[idx], written_first_round[idx]);
+        }
+
+        println!("\n\n Second round \n\n");
+
+        for idx in 0..read_second_round.len() {
+            print!("{}", read_second_round[idx]);
+            //   assert_eq!(read_second_round[idx], written_second_round[idx]);
         }
     }
 }
