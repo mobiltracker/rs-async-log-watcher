@@ -1,7 +1,7 @@
 use std::{error::Error, io::SeekFrom, sync::Arc, time::Duration};
 
-use async_fs::{File, Metadata};
-use async_std::{io::BufReader, sync::Sender, task::sleep};
+use async_fs::File;
+use async_std::{io::BufReader, path::Path, sync::Sender, task::sleep};
 use async_std::{path::PathBuf, sync::Receiver};
 use futures_lite::{AsyncReadExt, AsyncSeekExt};
 
@@ -11,12 +11,15 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(linux)]
 use std::os::linux::fs::MetadataExt;
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
 #[derive(Debug)]
 struct LogBufReader {
     file: BufReader<File>,
     sender: Arc<Sender<Vec<u8>>>,
     path: async_std::path::PathBuf,
-    metadata: Metadata,
+    last_ctime: u64,
 }
 
 #[derive(Debug)]
@@ -59,14 +62,12 @@ impl LogWatcher {
         let file = File::open(&self.path).await?;
         let (signal_tx, signal_rx) = async_std::sync::channel(4096);
         let path = self.path.clone();
-        let metadata = async_fs::metadata(&path).await?;
-
         async_std::task::spawn(async move {
             let mut detached = DetachedLogWatcher::Initializing(LogBufReader {
                 file: BufReader::new(file),
                 sender,
-                path: path.into(),
-                metadata,
+                path: path.clone().into(),
+                last_ctime: get_c_time(&path).await.unwrap(),
             });
 
             loop {
@@ -97,8 +98,6 @@ impl LogWatcher {
                             .next()
                             .await
                             .expect("failed to move next on detached log watcher");
-
-                        println!("{:?}", detached);
                     }
                 }
             }
@@ -119,14 +118,14 @@ impl DetachedLogWatcher {
                 Ok(size) if size > 4096 => Ok(DetachedLogWatcher::Reading(inner)),
                 Ok(size) => {
                     if size == 0 {
-                        let maybe_new_metadata = async_fs::metadata(&inner.path).await?;
+                        let curr_ctime = get_c_time(&inner.path).await?;
 
-                        if is_same_file(&inner.metadata, &maybe_new_metadata) {
-                            sleep(Duration::from_secs(1)).await;
-                            Ok(DetachedLogWatcher::Waiting(inner))
-                        } else {
-                            Ok(DetachedLogWatcher::Missing(inner))
+                        if curr_ctime > inner.last_ctime {
+                            return Ok(DetachedLogWatcher::Missing(inner));
                         }
+
+                        sleep(Duration::from_secs(1)).await;
+                        Ok(DetachedLogWatcher::Waiting(inner))
                     } else {
                         sleep(Duration::from_secs(1)).await;
                         Ok(DetachedLogWatcher::Waiting(inner))
@@ -151,12 +150,11 @@ impl DetachedLogWatcher {
             }
             DetachedLogWatcher::Reloading((path, sender)) => {
                 if path.exists().await {
-                    let metadata = async_fs::metadata(&path).await?;
                     let new_inner = LogBufReader {
                         file: BufReader::new(File::open(&path).await?),
-                        path: path,
+                        path: path.clone(),
                         sender,
-                        metadata,
+                        last_ctime: get_c_time(&path).await.unwrap(),
                     };
 
                     Ok(DetachedLogWatcher::Waiting(new_inner))
@@ -228,7 +226,10 @@ impl LogBufReader {
 
         match result {
             Ok(size) if size > 0 => match self.sender.try_send(buffer) {
-                Ok(_) => Ok(size),
+                Ok(_) => {
+                    self.last_ctime = get_c_time(&self.path).await?;
+                    Ok(size)
+                }
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::NotConnected,
                     "failed to send to channel",
@@ -258,18 +259,12 @@ impl std::ops::Deref for LogWatcher {
 
 #[cfg(windows)]
 // Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
-fn is_same_file(first: &Metadata, second: &Metadata) -> bool {
-    true
+async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
+    Ok(async_fs::metadata(path).await?.last_write_time())
 }
 
 #[cfg(unix)]
 // Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
-fn is_same_file(first: &Metadata, second: &Metadata) -> bool {
-    first.ino() == second.ino()
-}
-
-#[cfg(linux)]
-// Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
-fn is_same_file(first: &Metadata, second: &Metadata) -> bool {
-    first.st_ino() == second.st_ino()
+async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
+    Ok(async_fs::metadata(path).await?.ctime() as u64)
 }
