@@ -1,15 +1,22 @@
 use std::{error::Error, io::SeekFrom, sync::Arc, time::Duration};
 
-use async_fs::File;
+use async_fs::{File, Metadata};
 use async_std::{io::BufReader, sync::Sender, task::sleep};
 use async_std::{path::PathBuf, sync::Receiver};
 use futures_lite::{AsyncReadExt, AsyncSeekExt};
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[cfg(linux)]
+use std::os::linux::fs::MetadataExt;
 
 #[derive(Debug)]
 struct LogBufReader {
     file: BufReader<File>,
     sender: Arc<Sender<Vec<u8>>>,
     path: async_std::path::PathBuf,
+    metadata: Metadata,
 }
 
 #[derive(Debug)]
@@ -52,12 +59,14 @@ impl LogWatcher {
         let file = File::open(&self.path).await?;
         let (signal_tx, signal_rx) = async_std::sync::channel(4096);
         let path = self.path.clone();
+        let metadata = async_fs::metadata(&path).await?;
 
         async_std::task::spawn(async move {
             let mut detached = DetachedLogWatcher::Initializing(LogBufReader {
                 file: BufReader::new(file),
                 sender,
                 path: path.into(),
+                metadata,
             });
 
             loop {
@@ -87,56 +96,9 @@ impl LogWatcher {
                         detached = detached
                             .next()
                             .await
-                            .expect("failed to move next on detached log watcher")
-                    }
-                }
-            }
-        });
+                            .expect("failed to move next on detached log watcher");
 
-        Ok(signal_tx)
-    }
-
-    pub async fn spawn_no_skip(&self) -> Result<Sender<LogWatcherSignal>, Box<dyn Error>> {
-        let sender = self.sender.clone();
-        let file = File::open(&self.path).await?;
-        let (signal_tx, signal_rx) = async_std::sync::channel(4096);
-        let path = self.path.clone();
-
-        async_std::task::spawn(async move {
-            let mut detached = DetachedLogWatcher::Waiting(LogBufReader {
-                file: BufReader::new(file),
-                sender,
-                path,
-            });
-
-            loop {
-                match signal_rx.try_recv() {
-                    Ok(LogWatcherSignal::Close) => {
-                        detached.close().await;
-                    }
-                    Ok(LogWatcherSignal::Reload) => {
-                        detached.reload().await;
-                    }
-                    Ok(LogWatcherSignal::Swap(path)) => {
-                        detached.swap(path).await;
-                    }
-                    Err(err) => match err {
-                        async_std::sync::TryRecvError::Disconnected => {
-                            break;
-                        }
-                        _ => {}
-                    },
-                }
-
-                match detached {
-                    DetachedLogWatcher::Closed => {
-                        break;
-                    }
-                    _ => {
-                        detached = detached
-                            .next()
-                            .await
-                            .expect("failed to move next on detached log watcher")
+                        println!("{:?}", detached);
                     }
                 }
             }
@@ -155,9 +117,20 @@ impl DetachedLogWatcher {
             }
             DetachedLogWatcher::Waiting(mut inner) => match inner.read_next().await {
                 Ok(size) if size > 4096 => Ok(DetachedLogWatcher::Reading(inner)),
-                Ok(_) => {
-                    sleep(Duration::from_secs(1)).await;
-                    Ok(DetachedLogWatcher::Waiting(inner))
+                Ok(size) => {
+                    if size == 0 {
+                        let maybe_new_metadata = async_fs::metadata(&inner.path).await?;
+
+                        if is_same_file(&inner.metadata, &maybe_new_metadata) {
+                            sleep(Duration::from_secs(1)).await;
+                            Ok(DetachedLogWatcher::Waiting(inner))
+                        } else {
+                            Ok(DetachedLogWatcher::Missing(inner))
+                        }
+                    } else {
+                        sleep(Duration::from_secs(1)).await;
+                        Ok(DetachedLogWatcher::Waiting(inner))
+                    }
                 }
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::NotFound => Ok(DetachedLogWatcher::Missing(inner)),
@@ -178,10 +151,12 @@ impl DetachedLogWatcher {
             }
             DetachedLogWatcher::Reloading((path, sender)) => {
                 if path.exists().await {
+                    let metadata = async_fs::metadata(&path).await?;
                     let new_inner = LogBufReader {
                         file: BufReader::new(File::open(&path).await?),
                         path: path,
                         sender,
+                        metadata,
                     };
 
                     Ok(DetachedLogWatcher::Waiting(new_inner))
@@ -279,4 +254,22 @@ impl std::ops::Deref for LogWatcher {
     fn deref(&self) -> &Self::Target {
         &self.receiver
     }
+}
+
+#[cfg(windows)]
+// Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
+fn is_same_file(first: &Metadata, second: &Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+// Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
+fn is_same_file(first: &Metadata, second: &Metadata) -> bool {
+    first.ino() == second.ino()
+}
+
+#[cfg(linux)]
+// Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
+fn is_same_file(first: &Metadata, second: &Metadata) -> bool {
+    first.st_ino() == second.st_ino()
 }

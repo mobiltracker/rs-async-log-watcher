@@ -70,7 +70,7 @@ mod tests {
         test_writer.start().await;
         let now = Instant::now();
 
-        while now.elapsed().as_millis() < 1000 {
+        while now.elapsed().as_millis() < 5000 {
             while let Ok(data) = test_writer.written_rx.try_recv() {
                 written_first_round.push(data);
             }
@@ -101,7 +101,7 @@ mod tests {
         test_writer.close_and_make_new().await;
 
         let now = Instant::now();
-        while now.elapsed().as_millis() < 1000 {
+        while now.elapsed().as_millis() < 5000 {
             while let Ok(data) = test_writer.written_rx.try_recv() {
                 written_second_round.push(data);
             }
@@ -131,15 +131,17 @@ mod tests {
         sleep(Duration::from_secs(1)).await;
 
         for idx in 0..read_first_round.len() {
-            print!("{}", read_first_round[idx]);
+            // print!("{}", read_first_round[idx]);
             assert_eq!(read_first_round[idx], written_first_round[idx]);
         }
 
         println!("\n\n Second round \n\n");
 
         for idx in 0..read_second_round.len() {
-            print!("{}", read_second_round[idx]);
+            //  print!("{}", read_second_round[idx]);
             //   assert_eq!(read_second_round[idx], written_second_round[idx]);
         }
+
+        panic!("")
     }
 }
