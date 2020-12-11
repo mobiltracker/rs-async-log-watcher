@@ -57,18 +57,31 @@ impl LogWatcher {
         }
     }
 
-    pub async fn spawn(&self) -> Result<Sender<LogWatcherSignal>, Box<dyn Error>> {
+    pub async fn spawn(
+        &self,
+        skip_to_end: bool,
+    ) -> Result<Sender<LogWatcherSignal>, Box<dyn Error>> {
         let sender = self.sender.clone();
         let file = File::open(&self.path).await?;
         let (signal_tx, signal_rx) = async_std::sync::channel(4096);
         let path = self.path.clone();
+
         async_std::task::spawn(async move {
-            let mut detached = DetachedLogWatcher::Initializing(LogBufReader {
-                file: BufReader::new(file),
-                sender,
-                path: path.clone().into(),
-                last_ctime: get_c_time(&path).await.unwrap(),
-            });
+            let mut detached = if !skip_to_end {
+                DetachedLogWatcher::Initializing(LogBufReader {
+                    file: BufReader::new(file),
+                    sender,
+                    path: path.clone().into(),
+                    last_ctime: get_c_time(&path).await.unwrap(),
+                })
+            } else {
+                DetachedLogWatcher::Waiting(LogBufReader {
+                    file: BufReader::new(file),
+                    sender,
+                    path: path.clone().into(),
+                    last_ctime: get_c_time(&path).await.unwrap(),
+                })
+            };
 
             loop {
                 match signal_rx.try_recv() {

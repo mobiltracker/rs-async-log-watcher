@@ -14,7 +14,7 @@ mod tests {
         let mut test_writer = TestWriter::new("test_data", "test_single.txt", 1).await;
 
         let log_watcher = async_log_watcher::LogWatcher::new("test_data/test_single.txt");
-        let log_watcher_channel = log_watcher.spawn().await.unwrap();
+        let log_watcher_channel = log_watcher.spawn(false).await.unwrap();
 
         test_writer.start().await;
         let now = Instant::now();
@@ -62,7 +62,7 @@ mod tests {
         let mut test_writer = TestWriter::new("test_data", "test_reload.txt", 1).await;
 
         let log_watcher = async_log_watcher::LogWatcher::new("test_data/test_reload.txt");
-        let log_watcher_channel = log_watcher.spawn().await.unwrap();
+        let log_watcher_channel = log_watcher.spawn(false).await.unwrap();
 
         test_writer.start().await;
         let now = Instant::now();
