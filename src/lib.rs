@@ -1,9 +1,13 @@
 use std::{error::Error, io::SeekFrom, sync::Arc, time::Duration};
 
 use async_fs::File;
-use async_std::{io::BufReader, path::Path, sync::Sender, task::sleep};
-use async_std::{path::PathBuf, sync::Receiver};
-use futures_lite::{AsyncReadExt, AsyncSeekExt};
+use async_std::path::PathBuf;
+use async_std::{
+    channel::{Receiver, Sender},
+    io::prelude::SeekExt,
+    io::ReadExt,
+};
+use async_std::{io::BufReader, path::Path, task::sleep};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -48,7 +52,7 @@ pub enum LogWatcherSignal {
 
 impl LogWatcher {
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
-        let (sender, receiver) = async_std::sync::channel(4096);
+        let (sender, receiver) = async_std::channel::unbounded();
 
         Self {
             receiver,
@@ -63,7 +67,7 @@ impl LogWatcher {
     ) -> Result<Sender<LogWatcherSignal>, Box<dyn Error>> {
         let sender = self.sender.clone();
         let file = File::open(&self.path).await?;
-        let (signal_tx, signal_rx) = async_std::sync::channel(4096);
+        let (signal_tx, signal_rx) = async_std::channel::unbounded();
         let path = self.path.clone();
 
         async_std::task::spawn(async move {
@@ -95,7 +99,7 @@ impl LogWatcher {
                         detached.swap(path).await;
                     }
                     Err(err) => match err {
-                        async_std::sync::TryRecvError::Disconnected => {
+                        async_std::channel::TryRecvError::Closed => {
                             break;
                         }
                         _ => {}

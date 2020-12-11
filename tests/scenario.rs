@@ -5,9 +5,9 @@ use std::{
 
 use async_fs::File;
 use async_std::{
+    channel::{Receiver, Sender},
     io::BufWriter,
     path::{Path, PathBuf},
-    sync::{Receiver, Sender},
     task::sleep,
 };
 use futures_lite::AsyncWriteExt;
@@ -32,7 +32,7 @@ impl TestWriter {
                 .unwrap(),
         );
 
-        let (written_tx, written_rx) = async_std::sync::channel::<String>(4096);
+        let (written_tx, written_rx) = async_std::channel::unbounded();
 
         Self {
             file_path: path.join(file_name).to_path_buf(),
@@ -58,7 +58,7 @@ impl TestWriter {
                 sleep(Duration::from_millis(sleep_millis)).await;
                 let data = gen_random_string(count);
                 writer.write_all(data.as_bytes()).await.unwrap();
-                written_tx.send(data).await;
+                written_tx.send(data).await.unwrap();
                 count = count + 1;
                 writer.flush().await.unwrap();
             }
@@ -74,7 +74,7 @@ impl TestWriter {
 
     pub async fn close_and_make_new(&mut self) {
         self.stop();
-        let (written_tx, written_rx) = async_std::sync::channel::<String>(4096);
+        let (written_tx, written_rx) = async_std::channel::unbounded();
 
         self.written_rx = written_rx;
         self.written_tx = Some(written_tx);

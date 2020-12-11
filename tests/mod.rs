@@ -33,7 +33,10 @@ mod tests {
 
         test_writer.stop();
         sleep(Duration::from_secs(1)).await;
-        log_watcher_channel.send(LogWatcherSignal::Close).await;
+        log_watcher_channel
+            .send(LogWatcherSignal::Close)
+            .await
+            .unwrap();
 
         if let Ok(data) = test_writer.written_rx.try_recv() {
             written.push(data);
@@ -111,7 +114,10 @@ mod tests {
         }
 
         test_writer.stop();
-        log_watcher_channel.send(LogWatcherSignal::Close).await;
+        log_watcher_channel
+            .send(LogWatcherSignal::Close)
+            .await
+            .unwrap();
 
         while let Ok(data) = test_writer.written_rx.try_recv() {
             read_second_round.push(data);
