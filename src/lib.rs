@@ -71,7 +71,7 @@ impl LogWatcher {
         let path = self.path.clone();
 
         async_std::task::spawn(async move {
-            let mut detached = if !skip_to_end {
+            let mut detached = if skip_to_end {
                 DetachedLogWatcher::Initializing(LogBufReader {
                     file: BufReader::new(file),
                     sender,
@@ -79,7 +79,7 @@ impl LogWatcher {
                     last_ctime: get_c_time(&path).await.unwrap(),
                 })
             } else {
-                DetachedLogWatcher::Waiting(LogBufReader {
+                DetachedLogWatcher::Reading(LogBufReader {
                     file: BufReader::new(file),
                     sender,
                     path: path.clone().into(),
