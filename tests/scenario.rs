@@ -19,10 +19,17 @@ pub struct TestWriter {
     pub file_path: PathBuf,
     writer: Option<BufWriter<File>>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    line_count: u64,
+    pub cancel_result: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TestWriter {
-    pub async fn new<T: AsRef<Path>>(path: T, file_name: T, sleep_millis: u64) -> Self {
+    pub async fn new<T: AsRef<Path>>(
+        path: T,
+        file_name: T,
+        interval: u64,
+        line_count: u64,
+    ) -> Self {
         let path = path.as_ref();
         async_fs::create_dir(path).await.ok();
 
@@ -36,11 +43,13 @@ impl TestWriter {
 
         Self {
             file_path: path.join(file_name).to_path_buf(),
-            sleep_millis,
+            sleep_millis: interval,
             written_rx,
             written_tx: Some(written_tx),
             writer: Some(writer),
             cancel: Arc::new(false.into()),
+            line_count,
+            cancel_result: Arc::new(false.into()),
         }
     }
 
@@ -49,12 +58,12 @@ impl TestWriter {
         let cancel = self.cancel.clone();
         let sleep_millis = self.sleep_millis;
         let written_tx = self.written_tx.take().unwrap();
-
+        let line_count = self.line_count.clone();
         let mut writer = self.writer.take().unwrap();
-
+        let cancel_result = self.cancel_result.clone();
         async_std::task::spawn(async move {
             let mut count = 0;
-            while cancel.load(Ordering::SeqCst) == false {
+            while cancel.load(Ordering::SeqCst) == false && count < line_count {
                 sleep(Duration::from_millis(sleep_millis)).await;
                 let data = gen_random_string(count);
                 writer.write_all(data.as_bytes()).await.unwrap();
@@ -65,27 +74,16 @@ impl TestWriter {
 
             writer.flush().await.unwrap();
             writer.into_inner().await.unwrap().close().await.unwrap();
+            cancel_result.swap(true, Ordering::SeqCst);
         });
     }
 
-    pub fn stop(&mut self) {
+    pub async fn stop(&mut self) {
         self.cancel.swap(true, Ordering::SeqCst);
-    }
 
-    pub async fn close_and_make_new(&mut self) {
-        self.stop();
-        let (written_tx, written_rx) = async_std::channel::unbounded();
-
-        self.written_rx = written_rx;
-        self.written_tx = Some(written_tx);
-        sleep(Duration::from_millis(self.sleep_millis * 10)).await;
-        let writer = async_std::io::BufWriter::new(
-            async_fs::File::create(self.file_path.as_path())
-                .await
-                .unwrap(),
-        );
-        self.writer = Some(writer);
-        self.start().await;
+        while self.cancel_result.load(Ordering::SeqCst) == false {
+            sleep(Duration::from_millis(5)).await;
+        }
     }
 }
 
