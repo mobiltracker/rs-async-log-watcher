@@ -9,6 +9,8 @@ use async_std::{
 };
 use async_std::{io::BufReader, path::Path, task::sleep};
 
+mod pretty_state;
+
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
@@ -275,13 +277,11 @@ impl std::ops::Deref for LogWatcher {
 }
 
 #[cfg(windows)]
-// Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
 async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
     Ok(async_fs::metadata(path).await?.last_write_time())
 }
 
 #[cfg(unix)]
-// Waiting for stabilization  https://github.com/rust-lang/rust/pull/62980
 async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
     Ok(async_fs::metadata(path).await?.ctime() as u64)
 }
