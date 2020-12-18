@@ -69,7 +69,7 @@ mod tests {
 
         test_writer.start().await;
 
-        while test_writer.cancel_result.load(Ordering::SeqCst) {
+        while !test_writer.cancel_result.load(Ordering::SeqCst) {
             while let Ok(data) = test_writer.written_rx.try_recv() {
                 written_first_round.push(data);
             }
