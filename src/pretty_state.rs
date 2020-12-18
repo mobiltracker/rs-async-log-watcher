@@ -8,22 +8,24 @@ use std::io::SeekFrom;
 
 use async_fs::File;
 use async_std::{
-    io::{prelude::SeekExt, BufReader},
+    io::{prelude::BufReadExt, prelude::SeekExt, BufReader, ReadExt},
     path::{Path, PathBuf},
 };
 
-enum FileWatcherState {
-    Initilizing(FileWatcher<Initilizing>),
-    Reading(FileWatcher<Reading>),
+enum FileWatcher {
+    Initilizing(FileWatcherState<Initilizing>),
+    Reading(FileWatcherState<Reading>),
+    Waiting(FileWatcherState<Waiting>),
 }
 
-impl FileWatcherState {
+impl FileWatcher {
     pub async fn next(mut self) -> Result<Self, std::io::Error> {
         match self {
-            FileWatcherState::Initilizing(file_watcher) => Ok(FileWatcherState::Reading(
-                file_watcher.next().await.unwrap(),
-            )),
-            FileWatcherState::Reading(_) => todo!(),
+            FileWatcher::Initilizing(file_watcher) => {
+                Ok(FileWatcher::Reading(file_watcher.next().await.unwrap()))
+            }
+            FileWatcher::Reading(_) => todo!(),
+            FileWatcher::Waiting(_) => todo!(),
         }
     }
 }
@@ -37,19 +39,24 @@ struct Reading {
     last_ctime: u64,
 }
 
-struct FileWatcher<T> {
+struct Waiting {
+    file: BufReader<File>,
+    last_ctime: u64,
+}
+
+struct FileWatcherState<T> {
     state: T,
     path: PathBuf,
     output_rx: async_std::channel::Receiver<Vec<u8>>,
     output_tx: async_std::channel::Sender<Vec<u8>>,
 }
 
-impl FileWatcher<Initilizing> {
-    async fn new(path: impl AsRef<Path>) -> Result<FileWatcherState, std::io::Error>
+impl FileWatcherState<Initilizing> {
+    async fn new(path: impl AsRef<Path>) -> Result<FileWatcher, std::io::Error>
 where {
         let file = File::open(path.as_ref()).await?;
         let (output_tx, output_rx) = async_std::channel::unbounded();
-        Ok(FileWatcherState::Initilizing(FileWatcher {
+        Ok(FileWatcher::Initilizing(FileWatcherState {
             path: path.as_ref().clone().into(),
             output_rx,
             output_tx,
@@ -59,15 +66,36 @@ where {
         }))
     }
 
-    async fn next(mut self) -> Result<FileWatcher<Reading>, std::io::Error> {
+    async fn next(mut self) -> Result<FileWatcherState<Reading>, std::io::Error> {
         self.state.file.seek(SeekFrom::End(0)).await?;
         let last_ctime = get_c_time(&self.path).await?;
 
-        Ok(FileWatcher {
+        Ok(FileWatcherState {
             output_rx: self.output_rx,
             output_tx: self.output_tx,
             path: self.path,
             state: Reading {
+                file: self.state.file,
+                last_ctime,
+            },
+        })
+    }
+}
+
+impl FileWatcherState<Reading> {
+    pub async fn read(&mut self) -> Result<usize, std::io::Error> {
+        let mut buffer: Vec<u8> = Vec::new();
+        self.state.file.read_to_end(&mut buffer).await
+    }
+
+    pub async fn wait(mut self) -> Result<FileWatcherState<Waiting>, std::io::Error> {
+        let last_ctime = get_c_time(&self.path).await?;
+
+        Ok(FileWatcherState {
+            output_rx: self.output_rx,
+            output_tx: self.output_tx,
+            path: self.path,
+            state: Waiting {
                 file: self.state.file,
                 last_ctime,
             },
@@ -87,11 +115,11 @@ async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
 
 #[cfg(test)]
 mod test {
-    use super::{FileWatcher, Initilizing};
+    use super::{FileWatcherState, Initilizing};
 
     #[async_std::test]
     async fn init() {
-        let mut file_watcher = FileWatcher::new("test_data/test.txt").await.unwrap();
+        let mut file_watcher = FileWatcherState::new("test_data/test.txt").await.unwrap();
         file_watcher = file_watcher.next().await.unwrap();
     }
 }
