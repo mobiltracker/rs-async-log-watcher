@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 async-std = {version = "1.8.0", features = ["unstable"]}
 async-fs = "1.5.0"
+futures-lite = "1.11.2"
 
 [dev-dependencies]
 rand = "0.7.3"

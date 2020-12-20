@@ -9,7 +9,7 @@ use async_std::{
 };
 use async_std::{io::BufReader, path::Path, task::sleep};
 
-mod pretty_state;
+pub mod pretty_state;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;

@@ -2,7 +2,7 @@ mod scenario;
 #[cfg(test)]
 mod tests {
     use crate::scenario::TestWriter;
-    use async_log_watcher::LogWatcherSignal;
+    use async_log_watcher::{pretty_state::FileWatcher, LogWatcherSignal};
     use async_std::task::sleep;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
@@ -120,6 +120,50 @@ mod tests {
 
         for idx in 0..read_second_round.len() {
             assert_eq!(read_second_round[idx], written_second_round[idx]);
+        }
+    }
+
+    #[async_std::test]
+    async fn pretty() {
+        let mut written: Vec<String> = vec![];
+        let mut read: Vec<String> = vec![];
+        let count = 500;
+        let mut test_writer = TestWriter::new("test_data", "test_single.txt", 1, count).await;
+
+        let mut p_log_watcher = FileWatcher::new("test_data/test_single.txt").await;
+
+        test_writer.start().await;
+        p_log_watcher = p_log_watcher.next().await.unwrap();
+
+        while !test_writer.cancel_result.load(Ordering::SeqCst) {
+            if let Ok(data) = test_writer.written_rx.try_recv() {
+                written.push(data);
+            }
+        }
+
+        let channel = p_log_watcher.get_channel();
+
+        let mut count = 0;
+        loop {
+            p_log_watcher = p_log_watcher.next().await.unwrap();
+            if let Ok(msg) = channel.try_recv() {
+                for line in std::str::from_utf8(&msg).unwrap().split("\n") {
+                    if line.len() > 0 {
+                        read.push(format!("{}\n", line));
+                    }
+                }
+            }
+
+            count += 1;
+
+            if count > 10 {
+                break;
+            }
+        }
+
+        // assert_eq!(read.len(), count as usize);
+        for idx in 0..read.len() {
+            assert_eq!(read[idx], written[idx]);
         }
     }
 }

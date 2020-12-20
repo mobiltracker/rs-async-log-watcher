@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::{os::unix::fs::MetadataExt, todo};
+use std::{os::unix::fs::MetadataExt, time::Duration, todo};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -10,42 +10,63 @@ use async_fs::File;
 use async_std::{
     io::{prelude::BufReadExt, prelude::SeekExt, BufReader, ReadExt},
     path::{Path, PathBuf},
+    task::sleep,
 };
+use futures_lite::AsyncBufReadExt;
 
-enum FileWatcher {
+static MAX_BUFFER_SIZE: usize = 1024 * 16; //16KB
+
+#[derive(Debug)]
+pub enum FileWatcher {
     Initilizing(FileWatcherState<Initilizing>),
     Reading(FileWatcherState<Reading>),
-    Waiting(FileWatcherState<Waiting>),
 }
 
 impl FileWatcher {
-    pub async fn next(mut self) -> Result<Self, std::io::Error> {
+    pub async fn next(self) -> Result<Self, std::io::Error> {
         match self {
-            FileWatcher::Initilizing(file_watcher) => {
-                Ok(FileWatcher::Reading(file_watcher.next().await.unwrap()))
-            }
-            FileWatcher::Reading(_) => todo!(),
-            FileWatcher::Waiting(_) => todo!(),
+            FileWatcher::Initilizing(state) => Ok(FileWatcher::Reading(state.to_reading().await?)),
+            FileWatcher::Reading(mut state) => match state.state.last_bytes_read {
+                Some(bytes) => {
+                    let mut new = Vec::with_capacity(bytes);
+                    std::mem::swap(&mut new, &mut state.buffer);
+                    state.output_tx.send(new).await.unwrap();
+
+                    if bytes < 4096 {
+                        sleep(Duration::from_secs(1)).await;
+                    }
+                    Ok(FileWatcher::Reading(state.read().await?))
+                }
+                None => Ok(FileWatcher::Reading(state.read().await?)),
+            },
+        }
+    }
+
+    pub async fn new(path: impl AsRef<Path>) -> Self {
+        FileWatcherState::new(path).await.unwrap()
+    }
+
+    pub fn get_channel(&self) -> async_std::channel::Receiver<Vec<u8>> {
+        match self {
+            FileWatcher::Initilizing(state) => state.output_rx.clone(),
+            FileWatcher::Reading(state) => state.output_rx.clone(),
         }
     }
 }
-
-struct Initilizing {
+#[derive(Debug)]
+pub struct Initilizing {
     file: BufReader<File>,
 }
-
-struct Reading {
-    file: BufReader<File>,
-    last_ctime: u64,
-}
-
-struct Waiting {
+#[derive(Debug)]
+pub struct Reading {
     file: BufReader<File>,
     last_ctime: u64,
+    last_bytes_read: Option<usize>,
 }
-
-struct FileWatcherState<T> {
+#[derive(Debug)]
+pub struct FileWatcherState<T> {
     state: T,
+    buffer: Vec<u8>,
     path: PathBuf,
     output_rx: async_std::channel::Receiver<Vec<u8>>,
     output_tx: async_std::channel::Sender<Vec<u8>>,
@@ -61,12 +82,13 @@ where {
             output_rx,
             output_tx,
             state: Initilizing {
-                file: BufReader::new(file),
+                file: BufReader::with_capacity(4096, file),
             },
+            buffer: Vec::with_capacity(4096),
         }))
     }
 
-    async fn next(mut self) -> Result<FileWatcherState<Reading>, std::io::Error> {
+    async fn to_reading(mut self) -> Result<FileWatcherState<Reading>, std::io::Error> {
         self.state.file.seek(SeekFrom::End(0)).await?;
         let last_ctime = get_c_time(&self.path).await?;
 
@@ -74,31 +96,31 @@ where {
             output_rx: self.output_rx,
             output_tx: self.output_tx,
             path: self.path,
+            buffer: self.buffer,
             state: Reading {
                 file: self.state.file,
                 last_ctime,
+                last_bytes_read: None,
             },
         })
     }
 }
 
 impl FileWatcherState<Reading> {
-    pub async fn read(&mut self) -> Result<usize, std::io::Error> {
-        let mut buffer: Vec<u8> = Vec::new();
-        self.state.file.read_to_end(&mut buffer).await
-    }
-
-    pub async fn wait(mut self) -> Result<FileWatcherState<Waiting>, std::io::Error> {
+    pub async fn read(mut self) -> Result<FileWatcherState<Reading>, std::io::Error> {
         let last_ctime = get_c_time(&self.path).await?;
+        let bytes_read = self.state.file.read_to_end(&mut self.buffer).await?;
 
         Ok(FileWatcherState {
-            output_rx: self.output_rx,
-            output_tx: self.output_tx,
-            path: self.path,
-            state: Waiting {
+            state: Reading {
                 file: self.state.file,
                 last_ctime,
+                last_bytes_read: Some(bytes_read),
             },
+            buffer: self.buffer,
+            path: self.path,
+            output_rx: self.output_rx,
+            output_tx: self.output_tx,
         })
     }
 }
@@ -120,6 +142,15 @@ mod test {
     #[async_std::test]
     async fn init() {
         let mut file_watcher = FileWatcherState::new("test_data/test.txt").await.unwrap();
-        file_watcher = file_watcher.next().await.unwrap();
+        file_watcher = file_watcher
+            .next()
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap();
     }
 }
