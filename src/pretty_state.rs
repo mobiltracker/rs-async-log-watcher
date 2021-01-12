@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::{os::unix::fs::MetadataExt, time::Duration, todo};
+use std::{os::unix::fs::MetadataExt, todo};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
