@@ -4,17 +4,14 @@ use std::{os::unix::fs::MetadataExt, time::Duration, todo};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
-use std::io::SeekFrom;
+use std::{io::SeekFrom, time::Duration};
 
 use async_fs::File;
 use async_std::{
-    io::{prelude::BufReadExt, prelude::SeekExt, BufReader, ReadExt},
+    io::{prelude::SeekExt, BufReader, ReadExt},
     path::{Path, PathBuf},
     task::sleep,
 };
-use futures_lite::AsyncBufReadExt;
-
-static MAX_BUFFER_SIZE: usize = 1024 * 16; //16KB
 
 #[derive(Debug)]
 pub enum FileWatcher {
@@ -137,12 +134,12 @@ async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
 
 #[cfg(test)]
 mod test {
-    use super::{FileWatcherState, Initilizing};
+    use super::FileWatcherState;
 
     #[async_std::test]
     async fn init() {
-        let mut file_watcher = FileWatcherState::new("test_data/test.txt").await.unwrap();
-        file_watcher = file_watcher
+        let mut _file_watcher = FileWatcherState::new("test_data/test.txt").await.unwrap();
+        _file_watcher = _file_watcher
             .next()
             .await
             .unwrap()

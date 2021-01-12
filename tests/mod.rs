@@ -5,7 +5,7 @@ mod tests {
     use async_log_watcher::{pretty_state::FileWatcher, LogWatcherSignal};
     use async_std::task::sleep;
     use std::sync::atomic::Ordering;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     #[async_std::test]
     async fn it_works() {

@@ -78,13 +78,13 @@ impl TestWriter {
         });
     }
 
-    pub async fn stop(&mut self) {
-        self.cancel.swap(true, Ordering::SeqCst);
+    // pub async fn stop(&mut self) {
+    //     self.cancel.swap(true, Ordering::SeqCst);
 
-        while self.cancel_result.load(Ordering::SeqCst) == false {
-            sleep(Duration::from_millis(5)).await;
-        }
-    }
+    //     while self.cancel_result.load(Ordering::SeqCst) == false {
+    //         sleep(Duration::from_millis(5)).await;
+    //     }
+    // }
 }
 
 fn gen_random_string(idx: u64) -> String {
