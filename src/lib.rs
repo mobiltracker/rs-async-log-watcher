@@ -58,16 +58,6 @@ type BoxedError = Box<dyn Error + 'static + Send + Sync>;
 type BoxedResult<T> = Result<T, BoxedError>;
 type SpawnFnResult = Pin<Box<dyn Future<Output = BoxedResult<()>> + Send + Sync>>;
 
-// pub struct LogWatcherFn {
-//     inner: SpawnFnResult,
-// }
-
-// impl LogWatcherFn {
-//     pub async fn start(self) -> Result<(), BoxedError> {
-//         self.inner.await
-//     }
-// }
-
 impl LogWatcher {
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(256);
@@ -161,7 +151,6 @@ impl LogWatcher {
             Ok(())
         });
         future
-        // LogWatcherFn { inner: future }
     }
 }
 
