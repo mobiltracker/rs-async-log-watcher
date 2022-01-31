@@ -7,14 +7,14 @@ use std::{
 use tokio::{
     fs::File,
     io::{AsyncWriteExt, BufWriter},
-    sync::{mpsc::Receiver, mpsc::Sender},
+    sync::mpsc::{UnboundedReceiver, UnboundedSender},
     time::sleep,
 };
 
 pub struct TestWriter {
     sleep_millis: u64,
-    written_tx: Option<Sender<String>>,
-    pub written_rx: Receiver<String>,
+    written_tx: Option<UnboundedSender<String>>,
+    pub written_rx: UnboundedReceiver<String>,
     pub file_path: PathBuf,
     writer: Option<BufWriter<File>>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -34,7 +34,7 @@ impl TestWriter {
 
         let writer = BufWriter::new(File::create(path.join(file_name.as_ref())).await.unwrap());
 
-        let (written_tx, written_rx) = tokio::sync::mpsc::channel(256);
+        let (written_tx, written_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             file_path: path.join(file_name),
@@ -56,13 +56,14 @@ impl TestWriter {
         let line_count = self.line_count;
         let mut writer = self.writer.take().unwrap();
         let cancel_result = self.cancel_result.clone();
+
         tokio::task::spawn(async move {
             let mut count = 0;
             while !cancel.load(Ordering::SeqCst) && count < line_count {
                 sleep(Duration::from_millis(sleep_millis)).await;
                 let data = gen_random_string(count);
                 writer.write_all(data.as_bytes()).await.unwrap();
-                written_tx.send(data).await.unwrap();
+                written_tx.send(data).unwrap();
                 count += 1;
                 writer.flush().await.unwrap();
             }

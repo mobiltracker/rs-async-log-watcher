@@ -26,6 +26,8 @@ mod tests {
         while !test_writer.cancel_result.load(Ordering::SeqCst) {
             if let Ok(data) = test_writer.written_rx.try_recv() {
                 written.push(data);
+            } else {
+                sleep(Duration::from_millis(100)).await;
             }
         }
 

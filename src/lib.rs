@@ -308,11 +308,16 @@ impl LogBufReader {
 
 #[cfg(windows)]
 async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
-    Ok(async_fs::metadata(path).await?.last_write_time())
+    use std::os::windows::prelude::MetadataExt;
+
+    let meta = tokio::fs::metadata(path).await?;
+    Ok(meta.last_write_time())
 }
 
 #[cfg(unix)]
-async fn get_c_time(_path: &Path) -> Result<u64, std::io::Error> {
-    //Ok(async_fs::metadata(path).await?.ctime() as u64)
-    todo!()
+async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
+    use std::os::unix::prelude::MetadataExt;
+
+    let meta = tokio::fs::metadata(path).await?;
+    Ok(meta.ctime() as u64)
 }
