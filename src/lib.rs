@@ -1,8 +1,10 @@
 use std::{
     error::Error,
+    future::Future,
     io::SeekFrom,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,7 +35,7 @@ pub struct LogWatcher {
     sender: Arc<Sender<Vec<u8>>>,
     path: PathBuf,
     signal_tx: Sender<LogWatcherSignal>,
-    signal_rx: Mutex<Option<Receiver<LogWatcherSignal>>>,
+    signal_rx: std::sync::Mutex<Option<Receiver<LogWatcherSignal>>>,
 }
 
 #[derive(Debug)]
@@ -51,6 +53,20 @@ pub enum LogWatcherSignal {
     Reload,
     Swap(PathBuf),
 }
+
+type BoxedError = Box<dyn Error + 'static + Send + Sync>;
+type BoxedResult<T> = Result<T, BoxedError>;
+type SpawnFnResult = Pin<Box<dyn Future<Output = BoxedResult<()>> + Send + Sync>>;
+
+// pub struct LogWatcherFn {
+//     inner: SpawnFnResult,
+// }
+
+// impl LogWatcherFn {
+//     pub async fn start(self) -> Result<(), BoxedError> {
+//         self.inner.await
+//     }
+// }
 
 impl LogWatcher {
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
@@ -81,10 +97,7 @@ impl LogWatcher {
         self.receiver.try_recv()
     }
 
-    pub async fn spawn(
-        &self,
-        skip_to_end: bool,
-    ) -> Result<(), Box<dyn Error + 'static + Send + Sync>> {
+    pub fn spawn(&self, skip_to_end: bool) -> SpawnFnResult {
         let sender = self.sender.clone();
         let path = self.path.clone();
 
@@ -96,56 +109,59 @@ impl LogWatcher {
 
         let mut signal_rx = signal_rx.unwrap();
 
-        let file = File::open(&self.path).await?;
+        let future: SpawnFnResult = Box::pin(async move {
+            let file = File::open(&path).await?;
+            let mut detached = if skip_to_end {
+                DetachedLogWatcher::Initializing(LogBufReader {
+                    file: BufReader::new(file),
+                    sender,
+                    path: path.clone(),
+                    last_ctime: get_c_time(&path).await.unwrap(),
+                })
+            } else {
+                DetachedLogWatcher::Reading(LogBufReader {
+                    file: BufReader::new(file),
+                    sender,
+                    path: path.clone(),
+                    last_ctime: get_c_time(&path).await.unwrap(),
+                })
+            };
 
-        let mut detached = if skip_to_end {
-            DetachedLogWatcher::Initializing(LogBufReader {
-                file: BufReader::new(file),
-                sender,
-                path: path.clone(),
-                last_ctime: get_c_time(&path).await.unwrap(),
-            })
-        } else {
-            DetachedLogWatcher::Reading(LogBufReader {
-                file: BufReader::new(file),
-                sender,
-                path: path.clone(),
-                last_ctime: get_c_time(&path).await.unwrap(),
-            })
-        };
+            loop {
+                match signal_rx.try_recv() {
+                    Ok(LogWatcherSignal::Close) => {
+                        detached.close().await;
+                    }
+                    Ok(LogWatcherSignal::Reload) => {
+                        detached.reload().await;
+                    }
+                    Ok(LogWatcherSignal::Swap(path)) => {
+                        detached.swap(path).await;
+                    }
+                    Err(err) => {
+                        if err == TryRecvError::Disconnected {
+                            break;
+                        }
+                    }
+                }
 
-        loop {
-            match signal_rx.try_recv() {
-                Ok(LogWatcherSignal::Close) => {
-                    detached.close().await;
-                }
-                Ok(LogWatcherSignal::Reload) => {
-                    detached.reload().await;
-                }
-                Ok(LogWatcherSignal::Swap(path)) => {
-                    detached.swap(path).await;
-                }
-                Err(err) => {
-                    if err == TryRecvError::Disconnected {
+                match detached {
+                    DetachedLogWatcher::Closed => {
                         break;
+                    }
+                    _ => {
+                        detached = detached
+                            .next()
+                            .await
+                            .expect("failed to move next on detached log watcher");
                     }
                 }
             }
 
-            match detached {
-                DetachedLogWatcher::Closed => {
-                    break;
-                }
-                _ => {
-                    detached = detached
-                        .next()
-                        .await
-                        .expect("failed to move next on detached log watcher");
-                }
-            }
-        }
-
-        Ok(())
+            Ok(())
+        });
+        future
+        // LogWatcherFn { inner: future }
     }
 }
 

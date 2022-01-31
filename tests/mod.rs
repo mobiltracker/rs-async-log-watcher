@@ -15,7 +15,11 @@ mod tests {
         let mut test_writer = TestWriter::new("test_data", "test_single.txt", 1, count).await;
         let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_single.txt");
 
-        let _future = log_watcher.spawn(false).await;
+        let future = log_watcher.spawn(false);
+
+        tokio::task::spawn(async {
+            future.await.unwrap();
+        });
 
         test_writer.start().await;
 
@@ -66,7 +70,7 @@ mod tests {
         let mut test_writer = TestWriter::new("test_data", "test_reload.txt", 1, count).await;
 
         let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_reload.txt");
-        log_watcher.spawn(false).await.unwrap();
+        // log_watcher.spawn(false).await.unwrap();
 
         test_writer.start().await;
 
