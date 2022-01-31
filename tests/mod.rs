@@ -24,32 +24,20 @@ mod tests {
         test_writer.start().await;
 
         while !test_writer.cancel_result.load(Ordering::SeqCst) {
-            if let Ok(data) = test_writer.written_rx.try_recv() {
-                written.push(data);
-            } else {
-                sleep(Duration::from_millis(100)).await;
-            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        sleep(Duration::from_millis(2000)).await;
+
+        while let Some(data) = test_writer.written_rx.recv().await {
+            written.push(data);
         }
 
-        sleep(Duration::from_secs(1)).await;
-
-        log_watcher
-            .send_signal(LogWatcherSignal::Close)
-            .await
-            .unwrap();
+        assert_eq!(count as usize, written.len());
 
         while let Ok(data) = log_watcher.try_read_message() {
             for line in std::str::from_utf8(&data).unwrap().split('\n') {
                 if !line.is_empty() {
                     println!("{:?}", line);
-                    read.push(format!("{}\n", line));
-                }
-            }
-        }
-
-        while let Ok(data) = log_watcher.try_read_message() {
-            for line in std::str::from_utf8(&data).unwrap().split('\n') {
-                if !line.is_empty() {
                     read.push(format!("{}\n", line));
                 }
             }
@@ -72,17 +60,24 @@ mod tests {
         let mut test_writer = TestWriter::new("test_data", "test_reload.txt", 1, count).await;
 
         let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_reload.txt");
-        // log_watcher.spawn(false).await.unwrap();
+
+        let future = log_watcher.spawn(false);
+
+        tokio::task::spawn(async {
+            future.await.unwrap();
+        });
 
         test_writer.start().await;
 
         while !test_writer.cancel_result.load(Ordering::SeqCst) {
-            while let Ok(data) = test_writer.written_rx.try_recv() {
-                written_first_round.push(data);
-            }
+            sleep(Duration::from_millis(100)).await;
         }
 
-        sleep(Duration::from_millis(1000)).await;
+        sleep(Duration::from_millis(2000)).await;
+
+        while let Ok(data) = test_writer.written_rx.try_recv() {
+            written_first_round.push(data);
+        }
 
         while let Ok(data) = log_watcher.try_read_message() {
             for line in std::str::from_utf8(&data).unwrap().split('\n') {
@@ -96,9 +91,13 @@ mod tests {
         test_writer.start().await;
 
         while !test_writer.cancel_result.load(Ordering::SeqCst) {
-            while let Ok(data) = test_writer.written_rx.try_recv() {
-                written_second_round.push(data);
-            }
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        sleep(Duration::from_millis(2000)).await;
+
+        while let Ok(data) = test_writer.written_rx.try_recv() {
+            written_second_round.push(data);
         }
 
         sleep(Duration::from_secs(1)).await;

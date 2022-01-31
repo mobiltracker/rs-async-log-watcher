@@ -69,6 +69,7 @@ impl TestWriter {
             }
 
             writer.flush().await.unwrap();
+            writer.shutdown().await.unwrap();
             cancel_result.swap(true, Ordering::SeqCst);
         });
     }
