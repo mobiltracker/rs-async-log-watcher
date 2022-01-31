@@ -1,16 +1,15 @@
 use std::{
+    path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
-use async_fs::File;
-use async_std::{
-    channel::{Receiver, Sender},
-    io::BufWriter,
-    path::{Path, PathBuf},
-    task::sleep,
+use tokio::{
+    fs::File,
+    io::{AsyncWriteExt, BufWriter},
+    sync::{mpsc::Receiver, mpsc::Sender},
+    time::sleep,
 };
-use futures_lite::AsyncWriteExt;
 
 pub struct TestWriter {
     sleep_millis: u64,
@@ -31,18 +30,14 @@ impl TestWriter {
         line_count: u64,
     ) -> Self {
         let path = path.as_ref();
-        async_fs::create_dir(path).await.ok();
+        tokio::fs::create_dir(path).await.ok();
 
-        let writer = async_std::io::BufWriter::new(
-            async_fs::File::create(path.join(file_name.as_ref()))
-                .await
-                .unwrap(),
-        );
+        let writer = BufWriter::new(File::create(path.join(file_name.as_ref())).await.unwrap());
 
-        let (written_tx, written_rx) = async_std::channel::unbounded();
+        let (written_tx, written_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
-            file_path: path.join(file_name).to_path_buf(),
+            file_path: path.join(file_name),
             sleep_millis: interval,
             written_rx,
             written_tx: Some(written_tx),
@@ -58,40 +53,31 @@ impl TestWriter {
         let cancel = self.cancel.clone();
         let sleep_millis = self.sleep_millis;
         let written_tx = self.written_tx.take().unwrap();
-        let line_count = self.line_count.clone();
+        let line_count = self.line_count;
         let mut writer = self.writer.take().unwrap();
         let cancel_result = self.cancel_result.clone();
-        async_std::task::spawn(async move {
+        tokio::task::spawn(async move {
             let mut count = 0;
-            while cancel.load(Ordering::SeqCst) == false && count < line_count {
+            while !cancel.load(Ordering::SeqCst) && count < line_count {
                 sleep(Duration::from_millis(sleep_millis)).await;
                 let data = gen_random_string(count);
                 writer.write_all(data.as_bytes()).await.unwrap();
                 written_tx.send(data).await.unwrap();
-                count = count + 1;
+                count += 1;
                 writer.flush().await.unwrap();
             }
 
             writer.flush().await.unwrap();
-            writer.into_inner().await.unwrap().close().await.unwrap();
             cancel_result.swap(true, Ordering::SeqCst);
         });
     }
-
-    // pub async fn stop(&mut self) {
-    //     self.cancel.swap(true, Ordering::SeqCst);
-
-    //     while self.cancel_result.load(Ordering::SeqCst) == false {
-    //         sleep(Duration::from_millis(5)).await;
-    //     }
-    // }
 }
 
 fn gen_random_string(idx: u64) -> String {
     let mut rand_line: String = (1..99)
         .map(|_| {
             let rand_char = (rand::random::<u8>() % 0x5E) + 0x20;
-            std::str::from_utf8(&vec![rand_char])
+            std::str::from_utf8(&[rand_char])
                 .unwrap()
                 .to_owned()
                 .pop()

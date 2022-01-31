@@ -1,30 +1,29 @@
-use std::{error::Error, io::SeekFrom, sync::Arc, time::Duration};
-
-use async_fs::File;
-use async_std::path::PathBuf;
-use async_std::{
-    channel::{Receiver, Sender},
-    io::prelude::SeekExt,
-    io::ReadExt,
+use std::{
+    error::Error,
+    io::SeekFrom,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
-use async_std::{io::BufReader, path::Path, task::sleep};
-
-pub mod pretty_state;
-
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-
-#[cfg(linux)]
-use std::os::linux::fs::MetadataExt;
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncSeekExt, BufReader},
+    sync::mpsc::{
+        error::{SendError, TryRecvError},
+        Receiver, Sender,
+    },
+    time::sleep,
+};
 
 #[derive(Debug)]
 struct LogBufReader {
     file: BufReader<File>,
     sender: Arc<Sender<Vec<u8>>>,
-    path: async_std::path::PathBuf,
+    path: PathBuf,
     last_ctime: u64,
 }
 
@@ -33,6 +32,8 @@ pub struct LogWatcher {
     receiver: Receiver<Vec<u8>>,
     sender: Arc<Sender<Vec<u8>>>,
     path: PathBuf,
+    signal_tx: Sender<LogWatcherSignal>,
+    signal_rx: Mutex<Option<Receiver<LogWatcherSignal>>>,
 }
 
 #[derive(Debug)]
@@ -41,11 +42,10 @@ enum DetachedLogWatcher {
     Waiting(LogBufReader),
     Reading(LogBufReader),
     Missing(LogBufReader),
-    Reloading((async_std::path::PathBuf, Arc<Sender<Vec<u8>>>)),
+    Reloading((PathBuf, Arc<Sender<Vec<u8>>>)),
     Closed,
 }
-
-#[allow(dead_code)]
+#[derive(Debug)]
 pub enum LogWatcherSignal {
     Close,
     Reload,
@@ -54,75 +54,98 @@ pub enum LogWatcherSignal {
 
 impl LogWatcher {
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
-        let (sender, receiver) = async_std::channel::unbounded();
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        let (signal_tx, signal_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
             receiver,
             sender: Arc::new(sender),
             path: file_path.into(),
+            signal_rx: Some(signal_rx).into(),
+            signal_tx,
         }
+    }
+
+    pub async fn send_signal(
+        &self,
+        signal: LogWatcherSignal,
+    ) -> Result<(), SendError<LogWatcherSignal>> {
+        self.signal_tx.send(signal).await
+    }
+
+    pub async fn read_message(&mut self) -> Option<Vec<u8>> {
+        self.receiver.recv().await
+    }
+
+    pub fn try_read_message(&mut self) -> Result<Vec<u8>, TryRecvError> {
+        self.receiver.try_recv()
     }
 
     pub async fn spawn(
         &self,
         skip_to_end: bool,
-    ) -> Result<Sender<LogWatcherSignal>, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + 'static + Send + Sync>> {
         let sender = self.sender.clone();
-        let file = File::open(&self.path).await?;
-        let (signal_tx, signal_rx) = async_std::channel::unbounded();
         let path = self.path.clone();
 
-        async_std::task::spawn(async move {
-            let mut detached = if skip_to_end {
-                DetachedLogWatcher::Initializing(LogBufReader {
-                    file: BufReader::new(file),
-                    sender,
-                    path: path.clone().into(),
-                    last_ctime: get_c_time(&path).await.unwrap(),
-                })
-            } else {
-                DetachedLogWatcher::Reading(LogBufReader {
-                    file: BufReader::new(file),
-                    sender,
-                    path: path.clone().into(),
-                    last_ctime: get_c_time(&path).await.unwrap(),
-                })
-            };
+        let signal_rx = self.signal_rx.lock().unwrap().take();
 
-            loop {
-                match signal_rx.try_recv() {
-                    Ok(LogWatcherSignal::Close) => {
-                        detached.close().await;
-                    }
-                    Ok(LogWatcherSignal::Reload) => {
-                        detached.reload().await;
-                    }
-                    Ok(LogWatcherSignal::Swap(path)) => {
-                        detached.swap(path).await;
-                    }
-                    Err(err) => match err {
-                        async_std::channel::TryRecvError::Closed => {
-                            break;
-                        }
-                        _ => {}
-                    },
+        if signal_rx.is_none() {
+            panic!("Log watcher spanwed twice {:?}", self);
+        };
+
+        let mut signal_rx = signal_rx.unwrap();
+
+        let file = File::open(&self.path).await?;
+
+        let mut detached = if skip_to_end {
+            DetachedLogWatcher::Initializing(LogBufReader {
+                file: BufReader::new(file),
+                sender,
+                path: path.clone(),
+                last_ctime: get_c_time(&path).await.unwrap(),
+            })
+        } else {
+            DetachedLogWatcher::Reading(LogBufReader {
+                file: BufReader::new(file),
+                sender,
+                path: path.clone(),
+                last_ctime: get_c_time(&path).await.unwrap(),
+            })
+        };
+
+        loop {
+            match signal_rx.try_recv() {
+                Ok(LogWatcherSignal::Close) => {
+                    detached.close().await;
                 }
-
-                match detached {
-                    DetachedLogWatcher::Closed => {
+                Ok(LogWatcherSignal::Reload) => {
+                    detached.reload().await;
+                }
+                Ok(LogWatcherSignal::Swap(path)) => {
+                    detached.swap(path).await;
+                }
+                Err(err) => {
+                    if err == TryRecvError::Disconnected {
                         break;
-                    }
-                    _ => {
-                        detached = detached
-                            .next()
-                            .await
-                            .expect("failed to move next on detached log watcher");
                     }
                 }
             }
-        });
 
-        Ok(signal_tx)
+            match detached {
+                DetachedLogWatcher::Closed => {
+                    break;
+                }
+                _ => {
+                    detached = detached
+                        .next()
+                        .await
+                        .expect("failed to move next on detached log watcher");
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -168,7 +191,17 @@ impl DetachedLogWatcher {
                 Ok(DetachedLogWatcher::Reloading((inner.path, inner.sender)))
             }
             DetachedLogWatcher::Reloading((path, sender)) => {
-                if path.exists().await {
+                let file_exists = match tokio::fs::metadata(&path).await {
+                    Ok(meta) => Ok(meta.is_file()),
+                    Err(err) => match err.kind() {
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied => {
+                            Ok(false)
+                        }
+                        _ => Err(err),
+                    },
+                }?;
+
+                if file_exists {
                     let new_inner = LogBufReader {
                         file: BufReader::new(File::open(&path).await?),
                         path: path.clone(),
@@ -268,20 +301,13 @@ impl LogBufReader {
     }
 }
 
-impl std::ops::Deref for LogWatcher {
-    type Target = Receiver<Vec<u8>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.receiver
-    }
-}
-
 #[cfg(windows)]
 async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
     Ok(async_fs::metadata(path).await?.last_write_time())
 }
 
 #[cfg(unix)]
-async fn get_c_time(path: &Path) -> Result<u64, std::io::Error> {
-    Ok(async_fs::metadata(path).await?.ctime() as u64)
+async fn get_c_time(_path: &Path) -> Result<u64, std::io::Error> {
+    //Ok(async_fs::metadata(path).await?.ctime() as u64)
+    todo!()
 }
