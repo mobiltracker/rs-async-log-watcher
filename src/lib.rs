@@ -8,9 +8,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
-
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, BufReader},
