@@ -57,8 +57,8 @@ type SpawnFnResult = Pin<Box<dyn Future<Output = BoxedResult<()>> + Send + Sync>
 
 impl LogWatcher {
     pub fn new(file_path: impl Into<PathBuf>) -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::channel(256);
-        let (signal_tx, signal_rx) = tokio::sync::mpsc::channel(256);
+        let (sender, receiver) = tokio::sync::mpsc::channel(4096);
+        let (signal_tx, signal_rx) = tokio::sync::mpsc::channel(4096);
 
         Self {
             receiver,
@@ -84,7 +84,7 @@ impl LogWatcher {
         self.receiver.try_recv()
     }
 
-    pub fn spawn(&self, skip_to_end: bool) -> SpawnFnResult {
+    pub fn spawn(&self) -> SpawnFnResult {
         let sender = self.sender.clone();
         let path = self.path.clone();
 
@@ -98,21 +98,13 @@ impl LogWatcher {
 
         let future: SpawnFnResult = Box::pin(async move {
             let file = File::open(&path).await?;
-            let mut detached = if skip_to_end {
-                DetachedLogWatcher::Initializing(LogBufReader {
-                    file: BufReader::new(file),
-                    sender,
-                    path: path.clone(),
-                    last_ctime: get_c_time(&path).await.unwrap(),
-                })
-            } else {
-                DetachedLogWatcher::Reading(LogBufReader {
-                    file: BufReader::new(file),
-                    sender,
-                    path: path.clone(),
-                    last_ctime: get_c_time(&path).await.unwrap(),
-                })
-            };
+
+            let mut detached = DetachedLogWatcher::Initializing(LogBufReader {
+                file: BufReader::new(file),
+                sender,
+                path: path.clone(),
+                last_ctime: get_c_time(&path).await.unwrap(),
+            });
 
             loop {
                 match signal_rx.try_recv() {
@@ -168,10 +160,10 @@ impl DetachedLogWatcher {
                             return Ok(DetachedLogWatcher::Missing(inner));
                         }
 
-                        sleep(Duration::from_secs(1)).await;
+                        sleep(Duration::from_millis(200)).await;
                         Ok(DetachedLogWatcher::Waiting(inner))
                     } else {
-                        sleep(Duration::from_secs(1)).await;
+                        sleep(Duration::from_millis(200)).await;
                         Ok(DetachedLogWatcher::Waiting(inner))
                     }
                 }
