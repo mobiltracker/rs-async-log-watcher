@@ -100,13 +100,13 @@ impl LogWatcher {
             let mut detached = match File::open(&path).await {
                 Ok(file) => DetachedLogWatcher::Initializing(LogBufReader {
                     file: BufReader::new(file),
-                    sender,
+                    sender: sender.clone(),
                     path: path.clone(),
                     last_ctime: get_c_time(&path).await.unwrap(),
                 }),
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::NotFound => {
-                        DetachedLogWatcher::Reloading((path.clone(), sender))
+                        DetachedLogWatcher::Reloading((path.clone(), sender.clone()))
                     }
                     _ => Err(err)?,
                 },
@@ -135,10 +135,15 @@ impl LogWatcher {
                         break;
                     }
                     _ => {
-                        detached = detached
-                            .next()
-                            .await
-                            .expect("failed to move next on detached log watcher");
+                        detached = match detached.next().await {
+                            Ok(next) => next,
+                            Err(err) => match err.kind() {
+                                std::io::ErrorKind::NotFound => {
+                                    DetachedLogWatcher::Reloading((path.clone(), sender.clone()))
+                                }
+                                _ => Err(err)?,
+                            },
+                        };
                     }
                 }
             }
