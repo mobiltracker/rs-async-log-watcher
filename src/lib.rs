@@ -97,14 +97,20 @@ impl LogWatcher {
         let mut signal_rx = signal_rx.unwrap();
 
         let future: SpawnFnResult = Box::pin(async move {
-            let file = File::open(&path).await?;
-
-            let mut detached = DetachedLogWatcher::Initializing(LogBufReader {
-                file: BufReader::new(file),
-                sender,
-                path: path.clone(),
-                last_ctime: get_c_time(&path).await.unwrap(),
-            });
+            let mut detached = match File::open(&path).await {
+                Ok(file) => DetachedLogWatcher::Initializing(LogBufReader {
+                    file: BufReader::new(file),
+                    sender,
+                    path: path.clone(),
+                    last_ctime: get_c_time(&path).await.unwrap(),
+                }),
+                Err(err) => match err.kind() {
+                    std::io::ErrorKind::NotFound => {
+                        DetachedLogWatcher::Reloading((path.clone(), sender))
+                    }
+                    _ => Err(err)?,
+                },
+            };
 
             loop {
                 match signal_rx.try_recv() {
