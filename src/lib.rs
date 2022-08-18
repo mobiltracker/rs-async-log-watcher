@@ -272,10 +272,17 @@ impl LogBufReader {
 
         match result {
             Ok(size) if size > 0 => match self.sender.try_send(buffer) {
-                Ok(_) => {
-                    self.last_ctime = get_c_time(&self.path).await?;
-                    Ok(size)
-                }
+                Ok(_) => match get_c_time(&self.path).await {
+                    Ok(ctime) => {
+                        self.last_ctime = ctime;
+                        Ok(size)
+                    }
+                    Err(err) => match err.kind() {
+                        std::io::ErrorKind::NotFound => Ok(0),
+                        std::io::ErrorKind::UnexpectedEof => Ok(0),
+                        _ => Err(err),
+                    },
+                },
                 Err(_) => Err(std::io::Error::new(
                     std::io::ErrorKind::NotConnected,
                     "failed to send to channel",
@@ -284,6 +291,7 @@ impl LogBufReader {
             Ok(size) => Ok(size),
             Err(err) => match err.kind() {
                 std::io::ErrorKind::UnexpectedEof => Ok(0),
+                std::io::ErrorKind::NotFound => Ok(0),
                 _ => Err(err),
             },
         }
