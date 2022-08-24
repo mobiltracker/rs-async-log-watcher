@@ -341,6 +341,9 @@ impl LogBufReader {
                     };
                 }
                 Ok(_) => {
+                    if buffer.len() == 0 {
+                        return Ok(0);
+                    }
                     return match self.sender.try_send(buffer.into_bytes()) {
                         Ok(_) => match get_c_time(&self.path).await {
                             Ok(ctime) => {
