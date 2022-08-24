@@ -33,6 +33,40 @@ struct LogBufReader {
     mode: LogReaderMode,
 }
 
+pub struct LogWatcherBuilder {
+    path: PathBuf,
+    mode: LogReaderMode,
+    skip_to_end: bool,
+}
+
+impl LogWatcherBuilder {
+    pub fn mode(self, mode: LogReaderMode) -> Self {
+        Self { mode, ..self }
+    }
+
+    pub fn skip_to_end(self, skip_to_end: bool) -> Self {
+        Self {
+            skip_to_end,
+            ..self
+        }
+    }
+
+    pub fn build(self) -> LogWatcher {
+        let (sender, receiver) = tokio::sync::mpsc::channel(4096);
+        let (signal_tx, signal_rx) = tokio::sync::mpsc::channel(4096);
+
+        LogWatcher {
+            receiver,
+            sender: Arc::new(sender),
+            path: self.path,
+            signal_rx: Some(signal_rx).into(),
+            signal_tx,
+            mode: self.mode,
+            skip_to_end: self.skip_to_end,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct LogWatcher {
     receiver: Receiver<Vec<u8>>,
@@ -41,6 +75,7 @@ pub struct LogWatcher {
     signal_tx: Sender<LogWatcherSignal>,
     signal_rx: std::sync::Mutex<Option<Receiver<LogWatcherSignal>>>,
     mode: LogReaderMode,
+    skip_to_end: bool,
 }
 
 #[derive(Debug)]
@@ -64,17 +99,11 @@ type BoxedResult<T> = Result<T, BoxedError>;
 type SpawnFnResult = Pin<Box<dyn Future<Output = BoxedResult<()>> + Send + Sync>>;
 
 impl LogWatcher {
-    pub fn new(file_path: impl Into<PathBuf>) -> Self {
-        let (sender, receiver) = tokio::sync::mpsc::channel(4096);
-        let (signal_tx, signal_rx) = tokio::sync::mpsc::channel(4096);
-
-        Self {
-            receiver,
-            sender: Arc::new(sender),
+    pub fn builder(file_path: impl Into<PathBuf>) -> LogWatcherBuilder {
+        LogWatcherBuilder {
             path: file_path.into(),
-            signal_rx: Some(signal_rx).into(),
-            signal_tx,
             mode: LogReaderMode::ReadToEnd,
+            skip_to_end: true,
         }
     }
 
@@ -110,15 +139,29 @@ impl LogWatcher {
         let mut signal_rx = signal_rx.unwrap();
 
         let mode = self.mode.clone();
+        let skip_to_end = self.skip_to_end;
+
         let future: SpawnFnResult = Box::pin(async move {
             let mut detached = match File::open(&path).await {
-                Ok(file) => DetachedLogWatcher::Initializing(LogBufReader {
-                    file: BufReader::new(file),
-                    sender: sender.clone(),
-                    path: path.clone(),
-                    last_ctime: get_c_time(&path).await.unwrap(),
-                    mode,
-                }),
+                Ok(file) => {
+                    if skip_to_end {
+                        DetachedLogWatcher::Initializing(LogBufReader {
+                            file: BufReader::new(file),
+                            sender: sender.clone(),
+                            path: path.clone(),
+                            last_ctime: get_c_time(&path).await.unwrap(),
+                            mode,
+                        })
+                    } else {
+                        DetachedLogWatcher::Waiting(LogBufReader {
+                            file: BufReader::new(file),
+                            sender: sender.clone(),
+                            path: path.clone(),
+                            last_ctime: get_c_time(&path).await.unwrap(),
+                            mode,
+                        })
+                    }
+                }
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::NotFound => {
                         DetachedLogWatcher::Reloading((path.clone(), sender.clone(), mode))

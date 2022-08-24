@@ -13,7 +13,8 @@ mod tests {
         let mut read: Vec<String> = vec![];
         let count = 1000;
         let mut test_writer = TestWriter::new("test_data", "test_single.txt", 1, count).await;
-        let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_single.txt");
+        let mut log_watcher =
+            async_log_watcher::LogWatcher::builder("test_data/test_single.txt").build();
 
         let future = log_watcher.spawn();
 
@@ -55,8 +56,9 @@ mod tests {
         let mut read: Vec<String> = vec![];
         let count = 1000;
         let mut test_writer = TestWriter::new("test_data", "test_single.txt", 1, count).await;
-        let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_single.txt")
-            .set_mode(async_log_watcher::LogReaderMode::NextLine);
+        let mut log_watcher = async_log_watcher::LogWatcher::builder("test_data/test_single.txt")
+            .mode(async_log_watcher::LogReaderMode::NextLine)
+            .build();
 
         let future = log_watcher.spawn();
 
@@ -101,7 +103,8 @@ mod tests {
         let count = 500;
         let mut test_writer = TestWriter::new("test_data", "test_reload.txt", 1, count).await;
 
-        let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_reload.txt");
+        let mut log_watcher =
+            async_log_watcher::LogWatcher::builder("test_data/test_reload.txt").build();
 
         let future = log_watcher.spawn();
 
@@ -181,8 +184,9 @@ mod tests {
         let count = 500;
         let mut test_writer = TestWriter::new("test_data", "test_reload.txt", 1, count).await;
 
-        let mut log_watcher = async_log_watcher::LogWatcher::new("test_data/test_reload.txt")
-            .set_mode(async_log_watcher::LogReaderMode::NextLine);
+        let mut log_watcher = async_log_watcher::LogWatcher::builder("test_data/test_reload.txt")
+            .mode(async_log_watcher::LogReaderMode::NextLine)
+            .build();
 
         let future = log_watcher.spawn();
 
