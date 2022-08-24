@@ -10,7 +10,7 @@ use std::{
 
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader},
     sync::mpsc::{
         error::{SendError, TryRecvError},
         Receiver, Sender,
@@ -18,12 +18,19 @@ use tokio::{
     time::sleep,
 };
 
+#[derive(Debug, Clone, Copy)]
+pub enum LogReaderMode {
+    ReadToEnd,
+    NextLine,
+}
+
 #[derive(Debug)]
 struct LogBufReader {
     file: BufReader<File>,
     sender: Arc<Sender<Vec<u8>>>,
     path: PathBuf,
     last_ctime: u64,
+    mode: LogReaderMode,
 }
 
 #[derive(Debug)]
@@ -33,6 +40,7 @@ pub struct LogWatcher {
     path: PathBuf,
     signal_tx: Sender<LogWatcherSignal>,
     signal_rx: std::sync::Mutex<Option<Receiver<LogWatcherSignal>>>,
+    mode: LogReaderMode,
 }
 
 #[derive(Debug)]
@@ -41,7 +49,7 @@ enum DetachedLogWatcher {
     Waiting(LogBufReader),
     Reading(LogBufReader),
     Missing(LogBufReader),
-    Reloading((PathBuf, Arc<Sender<Vec<u8>>>)),
+    Reloading((PathBuf, Arc<Sender<Vec<u8>>>, LogReaderMode)),
     Closed,
 }
 #[derive(Debug)]
@@ -66,7 +74,12 @@ impl LogWatcher {
             path: file_path.into(),
             signal_rx: Some(signal_rx).into(),
             signal_tx,
+            mode: LogReaderMode::ReadToEnd,
         }
+    }
+
+    pub fn set_mode(self, mode: LogReaderMode) -> Self {
+        Self { mode, ..self }
     }
 
     pub async fn send_signal(
@@ -96,6 +109,7 @@ impl LogWatcher {
 
         let mut signal_rx = signal_rx.unwrap();
 
+        let mode = self.mode.clone();
         let future: SpawnFnResult = Box::pin(async move {
             let mut detached = match File::open(&path).await {
                 Ok(file) => DetachedLogWatcher::Initializing(LogBufReader {
@@ -103,10 +117,11 @@ impl LogWatcher {
                     sender: sender.clone(),
                     path: path.clone(),
                     last_ctime: get_c_time(&path).await.unwrap(),
+                    mode,
                 }),
                 Err(err) => match err.kind() {
                     std::io::ErrorKind::NotFound => {
-                        DetachedLogWatcher::Reloading((path.clone(), sender.clone()))
+                        DetachedLogWatcher::Reloading((path.clone(), sender.clone(), mode))
                     }
                     _ => Err(err)?,
                 },
@@ -135,15 +150,16 @@ impl LogWatcher {
                         break;
                     }
                     _ => {
-                        detached = match detached.next().await {
-                            Ok(next) => next,
-                            Err(err) => match err.kind() {
-                                std::io::ErrorKind::NotFound => {
-                                    DetachedLogWatcher::Reloading((path.clone(), sender.clone()))
-                                }
-                                _ => Err(err)?,
-                            },
-                        };
+                        detached =
+                            match detached.next().await {
+                                Ok(next) => next,
+                                Err(err) => match err.kind() {
+                                    std::io::ErrorKind::NotFound => DetachedLogWatcher::Reloading(
+                                        (path.clone(), sender.clone(), mode),
+                                    ),
+                                    _ => Err(err)?,
+                                },
+                            };
                     }
                 }
             }
@@ -193,9 +209,13 @@ impl DetachedLogWatcher {
             },
             DetachedLogWatcher::Missing(inner) => {
                 inner.sender.try_send(inner.file.buffer().to_vec()).ok();
-                Ok(DetachedLogWatcher::Reloading((inner.path, inner.sender)))
+                Ok(DetachedLogWatcher::Reloading((
+                    inner.path,
+                    inner.sender,
+                    inner.mode,
+                )))
             }
-            DetachedLogWatcher::Reloading((path, sender)) => {
+            DetachedLogWatcher::Reloading((path, sender, mode)) => {
                 let file_exists = match tokio::fs::metadata(&path).await {
                     Ok(meta) => Ok(meta.is_file()),
                     Err(err) => match err.kind() {
@@ -212,12 +232,13 @@ impl DetachedLogWatcher {
                         path: path.clone(),
                         sender,
                         last_ctime: get_c_time(&path).await.unwrap(),
+                        mode,
                     };
 
                     Ok(DetachedLogWatcher::Waiting(new_inner))
                 } else {
                     sleep(Duration::from_secs(1)).await;
-                    Ok(DetachedLogWatcher::Reloading((path, sender)))
+                    Ok(DetachedLogWatcher::Reloading((path, sender, mode)))
                 }
             }
             DetachedLogWatcher::Closed => Ok(DetachedLogWatcher::Closed),
@@ -249,7 +270,11 @@ impl DetachedLogWatcher {
                 if result == 0 {
                     inner.sender.try_send(inner.file.buffer().to_vec()).ok();
                 }
-                *self = DetachedLogWatcher::Reloading((inner.path.clone(), inner.sender.clone()));
+                *self = DetachedLogWatcher::Reloading((
+                    inner.path.clone(),
+                    inner.sender.clone(),
+                    inner.mode,
+                ));
             }
             DetachedLogWatcher::Reloading(_) | DetachedLogWatcher::Closed => {}
         }
@@ -266,10 +291,10 @@ impl DetachedLogWatcher {
                 if result == 0 {
                     inner.sender.try_send(inner.file.buffer().to_vec()).ok();
                 }
-                *self = DetachedLogWatcher::Reloading((path, inner.sender.clone()));
+                *self = DetachedLogWatcher::Reloading((path, inner.sender.clone(), inner.mode));
             }
-            DetachedLogWatcher::Reloading((_old_path, sender)) => {
-                *self = DetachedLogWatcher::Reloading((path, sender.clone()));
+            DetachedLogWatcher::Reloading((_old_path, sender, mode)) => {
+                *self = DetachedLogWatcher::Reloading((path, sender.clone(), mode.clone()));
             }
             DetachedLogWatcher::Closed => {}
         }
@@ -278,9 +303,76 @@ impl DetachedLogWatcher {
 
 impl LogBufReader {
     async fn read_next(&mut self) -> Result<usize, std::io::Error> {
+        match self.mode {
+            LogReaderMode::ReadToEnd => self.read_to_end().await,
+            LogReaderMode::NextLine => self.read_next_line().await,
+        }
+    }
+
+    async fn read_next_line(&mut self) -> Result<usize, std::io::Error> {
+        let mut buffer = String::new();
+        const MAX_SIZE: usize = 4096 * 16;
+
+        loop {
+            let total_size = buffer.len();
+
+            match self.file.read_line(&mut buffer).await {
+                Ok(size) if size > 0 => {
+                    if total_size > MAX_SIZE {
+                        return match self.sender.try_send(buffer.into_bytes()) {
+                            Ok(_) => match get_c_time(&self.path).await {
+                                Ok(ctime) => {
+                                    self.last_ctime = ctime;
+                                    Ok(total_size)
+                                }
+                                Err(err) => match err.kind() {
+                                    std::io::ErrorKind::NotFound => Ok(total_size),
+                                    std::io::ErrorKind::UnexpectedEof => Ok(total_size),
+                                    _ => Err(err),
+                                },
+                            },
+                            Err(_) => Err(std::io::Error::new(
+                                std::io::ErrorKind::NotConnected,
+                                "failed to send to channel",
+                            )),
+                        };
+                    } else {
+                        continue;
+                    };
+                }
+                Ok(_) => {
+                    return match self.sender.try_send(buffer.into_bytes()) {
+                        Ok(_) => match get_c_time(&self.path).await {
+                            Ok(ctime) => {
+                                self.last_ctime = ctime;
+                                Ok(total_size)
+                            }
+                            Err(err) => match err.kind() {
+                                std::io::ErrorKind::NotFound => Ok(total_size),
+                                std::io::ErrorKind::UnexpectedEof => Ok(total_size),
+                                _ => Err(err),
+                            },
+                        },
+                        Err(_) => Err(std::io::Error::new(
+                            std::io::ErrorKind::NotConnected,
+                            "failed to send to channel",
+                        )),
+                    };
+                }
+                Err(err) => {
+                    return match err.kind() {
+                        std::io::ErrorKind::UnexpectedEof => Ok(total_size),
+                        std::io::ErrorKind::NotFound => Ok(total_size),
+                        _ => Err(err),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn read_to_end(&mut self) -> Result<usize, std::io::Error> {
         let mut buffer: Vec<u8> = Vec::new();
         let result: Result<usize, std::io::Error> = self.file.read_to_end(&mut buffer).await;
-
         match result {
             Ok(size) if size > 0 => match self.sender.try_send(buffer) {
                 Ok(_) => match get_c_time(&self.path).await {
